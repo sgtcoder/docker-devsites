@@ -65,19 +65,21 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY 60-devsites-forward.sh /etc/entrypoint.d/60-devsites-forward.sh
 
 # Node 24 and the latest npm, as on the Mac (update.sh), so npm writes identical lock files in both.
-# Also Chrome's system libraries for Browsershot/Puppeteer.
-# Chrome itself comes from each project: npx puppeteer browsers install chrome
 COPY --from=node:24-trixie-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:24-trixie-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && npm install --no-audit --no-fund -g npm@latest \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
-        libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
-        libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
-        libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
-    && rm -rf /var/lib/apt/lists/*
+    && npm install --no-audit --no-fund -g npm@latest
+
+# Chrome for Browsershot/Puppeteer, with its apt libraries (--install-deps). Every project's Puppeteer
+# uses this one through PUPPETEER_EXECUTABLE_PATH instead of downloading its own.
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chrome \
+    PUPPETEER_SKIP_DOWNLOAD=true
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-liberation \
+    && npx -y @puppeteer/browsers install chrome@stable --path /opt/chrome --install-deps \
+    && ln -s "$(find /opt/chrome -type f -name chrome -perm -u+x | head -n1)" /usr/local/bin/chrome \
+    && chrome --version \
+    && rm -rf /var/lib/apt/lists/* /root/.npm
 
 USER www-data
 WORKDIR /projects
