@@ -1,20 +1,69 @@
-FROM serversideup/php:8.5-fpm
+FROM debian:trixie-slim
 
-USER root
-# Matches the server's PHP_EXTS in sh/install_packages.sh; the base image already has the rest.
-# Xdebug is installed but off; enable per command with XDEBUG_MODE=debug.
-RUN install-php-extensions intl gd bcmath exif gmp sockets \
-        calendar ffi ftp gettext shmop sysvmsg sysvsem sysvshm \
-        bz2 dba gearman gnupg igbinary imagick maxminddb mcrypt mysqli oauth raphf \
-        soap ssh2 uuid xdebug xmlrpc xsl yaml \
-    && printf 'xdebug.mode="off"\n' > /usr/local/etc/php/conf.d/zz-devsites-xdebug.ini \
-    && apt-get update && apt-get install -y --no-install-recommends socat \
+# Prebuilt PHP from packages.sury.org, the same php8.5-* packages as PHP_EXTS in sh/install_packages.sh
+# (minus dev, plus pgsql). Nothing compiles, so the emulated arm64 build only unpacks packages.
+# php8.5-common already has calendar, exif, ffi, ftp, gettext, shmop, sockets and sysv*.
+ARG PHP=8.5
+ENV PHP_MEMORY_LIMIT=256M \
+    PHP_UPLOAD_MAX_FILE_SIZE=100M \
+    PHP_POST_MAX_SIZE=100M \
+    PHP_MAX_EXECUTION_TIME=99 \
+    COMPOSER_HOME=/composer
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git unzip socat \
+    && curl -fsSLo /tmp/sury.deb https://packages.sury.org/debsuryorg-archive-keyring.deb \
+    && dpkg -i /tmp/sury.deb && rm /tmp/sury.deb \
+    && echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ trixie main" \
+        > /etc/apt/sources.list.d/php.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        php$PHP-bcmath php$PHP-bz2 php$PHP-cli php$PHP-common php$PHP-curl php$PHP-dba php$PHP-fpm \
+        php$PHP-gd php$PHP-gearman php$PHP-gmp php$PHP-gnupg php$PHP-igbinary php$PHP-imagick php$PHP-intl \
+        php$PHP-maxminddb php$PHP-mbstring php$PHP-mcrypt php$PHP-mysql php$PHP-oauth php$PHP-pgsql php$PHP-raphf \
+        php$PHP-readline php$PHP-redis php$PHP-soap php$PHP-sqlite3 php$PHP-ssh2 php$PHP-uuid \
+        php$PHP-xdebug php$PHP-xml php$PHP-xmlrpc php$PHP-yaml php$PHP-zip \
     && rm -rf /var/lib/apt/lists/*
-# Web requests run as local, so Laravel loads .env.local when a project has one.
-# Not set container-wide: it would override phpunit.xml's APP_ENV=testing.
+
+# Limits come from the compose file's PHP_* variables, for CLI and FPM alike.
+# Xdebug is installed but off; enable per command with XDEBUG_MODE=debug.
+# Opcache off so edits show up immediately.
+RUN printf '%s\n' \
+        '; priority=99' \
+        'memory_limit = ${PHP_MEMORY_LIMIT}' \
+        'upload_max_filesize = ${PHP_UPLOAD_MAX_FILE_SIZE}' \
+        'post_max_size = ${PHP_POST_MAX_SIZE}' \
+        'max_execution_time = ${PHP_MAX_EXECUTION_TIME}' \
+        'opcache.enable = 0' \
+        'xdebug.mode = "off"' \
+        > /etc/php/$PHP/mods-available/devsites.ini \
+    && phpenmod -v $PHP devsites
+
+# FPM runs as www-data on :9000 for nginx. Web requests run as local, so Laravel loads .env.local
+# when a project has one. Not set container-wide: it would override phpunit.xml's APP_ENV=testing.
 # Plain http locally: turn off laravel-functions' https redirect and secure cookies.
-RUN printf '[${PHP_FPM_POOL_NAME}]\nenv[APP_ENV] = "local"\nenv[DISABLE_SSL] = "true"\nenv[SESSION_SECURE_COOKIE] = "false"\n' > /usr/local/etc/php-fpm.d/zzzz-devsites.conf
+RUN sed -i -e 's|^error_log = .*|error_log = /proc/self/fd/2|' -e 's|^pid = .*|pid = /run/php/php-fpm.pid|' \
+        /etc/php/$PHP/fpm/php-fpm.conf \
+    && printf '%s\n' \
+        '[www]' \
+        'listen = 9000' \
+        'pm = dynamic' \
+        'pm.max_children = 20' \
+        'pm.start_servers = 2' \
+        'pm.min_spare_servers = 1' \
+        'pm.max_spare_servers = 4' \
+        'clear_env = no' \
+        'catch_workers_output = yes' \
+        'decorate_workers_output = no' \
+        'env[APP_ENV] = "local"' \
+        'env[DISABLE_SSL] = "true"' \
+        'env[SESSION_SECURE_COOKIE] = "false"' \
+        > /etc/php/$PHP/fpm/pool.d/www.conf \
+    && ln -s /usr/sbin/php-fpm$PHP /usr/local/sbin/php-fpm \
+    && mkdir -p /run/php /composer /projects /var/www \
+    && chown www-data:www-data /run/php /composer /var/www
+
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY 60-devsites-forward.sh /etc/entrypoint.d/60-devsites-forward.sh
+
 # Node 24 and the latest npm, as on the Mac (update.sh), so npm writes identical lock files in both.
 # Also Chrome's system libraries for Browsershot/Puppeteer.
 # Chrome itself comes from each project: npx puppeteer browsers install chrome
@@ -24,9 +73,14 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && npm install --no-audit --no-fund -g npm@latest \
     && apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
+        fonts-liberation libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
         libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
         libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
         libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
+
 USER www-data
+WORKDIR /projects
+EXPOSE 9000
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["php-fpm", "-F"]
