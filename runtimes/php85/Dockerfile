@@ -1,7 +1,7 @@
 FROM debian:trixie-slim
 
 # Prebuilt PHP from packages.sury.org, the same php8.5-* packages as PHP_EXTS in sh/install_packages.sh
-# (minus dev, plus pgsql). Nothing compiles, so the emulated arm64 build only unpacks packages.
+# (minus dev). Nothing compiles, so the emulated arm64 build only unpacks packages.
 # php8.5-common already has calendar, exif, ffi, ftp, gettext, shmop, sockets and sysv*.
 ARG PHP=8.5
 ENV PHP_MEMORY_LIMIT=256M \
