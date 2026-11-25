@@ -60,6 +60,10 @@ RUN sed -i -e 's|^error_log = .*|error_log = /proc/self/fd/2|' -e 's|^pid = .*|p
     && mkdir -p /run/php /composer /projects /var/www \
     && chown www-data:www-data /run/php /composer /var/www
 
+# Projects are mounted from the Mac with the Mac user's ownership; without this git refuses them as
+# "dubious ownership", which Composer hits when it reads the project's version.
+RUN git config --system --add safe.directory '*'
+
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY 60-devsites-forward.sh /etc/entrypoint.d/60-devsites-forward.sh
